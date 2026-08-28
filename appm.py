@@ -1,6 +1,7 @@
 import os
 import random
 import io
+import zipfile
 import requests
 from PIL import Image
 import streamlit as st
@@ -9,7 +10,7 @@ import streamlit as st
 # TETAPAN HALAMAN STREAMLIT
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="SpriteStudio Marker - LPC Character Generator",
+    page_title="SpriteStudio Marker - LPC Character Studio",
     page_icon="🎨",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -42,64 +43,59 @@ DIRECTION_MAP = {
 SHEET_WIDTH = 832
 SHEET_HEIGHT = 1344
 
-RAW_BASE_URL = "https://raw.githubusercontent.com/mamaiv3/Universal-LPC-Spritesheet-Character-Generator/master/sheet_definitions"
-
 # -----------------------------------------------------------------------------
-# AMBIL KATALOG GUNA GIT TREE (HANYA 1 API CALL)
+# MUAT TURUN & EKSTRAK ZIP DARI REPO (TANPA HAD GITHUB API)
 # -----------------------------------------------------------------------------
-@st.cache_data(ttl=3600, show_spinner="Memuat naik senarai fail dari GitHub...")
-def get_repo_catalog():
+@st.cache_data(show_spinner="Memuat turun & memproses folder aset dari repositori...")
+def load_repo_assets():
     """
-    Menggunakan Git Tree API (1 call sahaja) untuk mengambil keseluruhan senarai fail.
+    Memuat turun repositori ZIP mentah terus dari GitHub.
+    Kaedah ini tidak melepasi had API GitHub (No Rate Limit).
     """
+    zip_url = "https://github.com/mamaiv3/Universal-LPC-Spritesheet-Character-Generator/archive/refs/heads/master.zip"
     catalog = {}
-    url = "https://api.github.com/repos/mamaiv3/Universal-LPC-Spritesheet-Character-Generator/git/trees/master?recursive=1"
+    images_db = {}
     
-    headers = {"User-Agent": "StreamlitApp"}
-    
-    # Guna Personal Access Token jika disetkan dalam Streamlit Secrets
-    if "GITHUB_TOKEN" in st.secrets:
-        headers["Authorization"] = f"token {st.secrets['GITHUB_TOKEN']}"
-
     try:
-        res = requests.get(url, headers=headers, timeout=15)
+        res = requests.get(zip_url, timeout=60)
         res.raise_for_status()
-        tree_data = res.json().get("tree", [])
-
-        for item in tree_data:
-            path = item.get("path", "")
-            if path.startswith("sheet_definitions/") and path.endswith(".png"):
-                parts = path.split("/")
-                if len(parts) >= 3:
-                    cat = parts[1]
-                    file_name = parts[-1]
-                    raw_url = f"https://raw.githubusercontent.com/mamaiv3/Universal-LPC-Spritesheet-Character-Generator/master/{path}"
-
-                    if cat not in catalog:
-                        catalog[cat] = {}
-                    catalog[cat][file_name] = raw_url
-
-    except Exception as e:
-        st.error(f"Ralat API GitHub: {e}. Menampilkan senarai laluan asas.")
         
-    return catalog
-
-@st.cache_data(show_spinner=False)
-def load_image_from_raw_url(url: str):
-    res = requests.get(url, timeout=15)
-    return res.content
+        with zipfile.ZipFile(io.BytesIO(res.content)) as z:
+            for file_info in z.infolist():
+                filename = file_info.filename
+                
+                # Hanya ambil fail .png di dalam folder sheet_definitions
+                if "sheet_definitions/" in filename and filename.endswith(".png"):
+                    parts = filename.split("/")
+                    
+                    # Cari indeks folder sheet_definitions
+                    if "sheet_definitions" in parts:
+                        idx = parts.index("sheet_definitions")
+                        if len(parts) > idx + 2:
+                            cat = parts[idx + 1]
+                            file_name = parts[-1]
+                            
+                            if cat not in catalog:
+                                catalog[cat] = {}
+                            
+                            catalog[cat][file_name] = filename
+                            images_db[filename] = z.read(filename)
+                            
+        return catalog, images_db
+    except Exception as e:
+        st.error(f"Gagal memuat turun fail aset: {e}")
+        return {}, {}
 
 # -----------------------------------------------------------------------------
 # FUNGSI GABUNGAN LAPISAN PNG
 # -----------------------------------------------------------------------------
-def composite_spritesheet(selected_urls: list) -> Image.Image:
+def composite_spritesheet(selected_keys: list, images_db: dict) -> Image.Image:
     canvas = Image.new("RGBA", (SHEET_WIDTH, SHEET_HEIGHT), (0, 0, 0, 0))
 
-    for url in selected_urls:
-        if url:
+    for key in selected_keys:
+        if key and key in images_db:
             try:
-                img_bytes = load_image_from_raw_url(url)
-                layer_img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
+                layer_img = Image.open(io.BytesIO(images_db[key])).convert("RGBA")
                 if layer_img.size != (SHEET_WIDTH, SHEET_HEIGHT):
                     layer_img = layer_img.resize((SHEET_WIDTH, SHEET_HEIGHT), Image.Resampling.NEAREST)
                 canvas = Image.alpha_composite(canvas, layer_img)
@@ -142,13 +138,13 @@ def generate_gif(sheet: Image.Image, anim_name: str, direction_idx: int) -> byte
 st.title("🎨 SpriteStudio Marker - LPC Character Studio")
 st.caption("Penjana Watak 2D NPC Terbina")
 
-catalog = get_repo_catalog()
+catalog, images_db = load_repo_assets()
 
 with st.sidebar:
     st.header("⚙️ Tetapan Folder GitHub")
 
     if catalog:
-        st.success("Berjaya membaca folder GitHub!")
+        st.success("Berjaya membaca folder aset dari GitHub!")
         st.markdown("---")
 
         if st.button("🎲 Randomize NPC Watak", use_container_width=True, type="primary"):
@@ -183,22 +179,20 @@ with st.sidebar:
 
         if 'random_trigger' in st.session_state:
             st.session_state['random_trigger'] = False
-    else:
-        st.warning("Menunggu kuota GitHub API diset semula atau sila gunakan Github Personal Token.")
 
-ordered_urls = []
+ordered_keys = []
 if catalog:
     for cat in LPC_LAYER_ORDER:
         if cat in selected_files and selected_files[cat]:
-            ordered_urls.append(selected_files[cat])
+            ordered_keys.append(selected_files[cat])
 
-    for cat, url in selected_files.items():
-        if cat not in LPC_LAYER_ORDER and url:
-            ordered_urls.append(url)
+    for cat, key in selected_files.items():
+        if cat not in LPC_LAYER_ORDER and key:
+            ordered_keys.append(key)
 
 col1, col2 = st.columns([1, 1])
 
-if catalog and ordered_urls:
+if catalog and ordered_keys:
     with col1:
         st.subheader("🎬 Tetapan Animasi & Arah")
 
@@ -206,7 +200,7 @@ if catalog and ordered_urls:
         direction_name = st.selectbox("Pilih Arah Pandangan:", list(DIRECTION_MAP.keys()))
         direction_idx = DIRECTION_MAP[direction_name]
 
-        composited_sheet = composite_spritesheet(ordered_urls)
+        composited_sheet = composite_spritesheet(ordered_keys, images_db)
         gif_bytes = generate_gif(composited_sheet, anim_name, direction_idx)
 
         st.markdown("#### 👁️ Pratonton Animasi NPC (Live Preview)")
