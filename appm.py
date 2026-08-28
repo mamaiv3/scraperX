@@ -42,28 +42,35 @@ DIRECTION_MAP = {
 SHEET_WIDTH = 832
 SHEET_HEIGHT = 1344
 
-# URL Mentah Repositori A (Repo asal anda yang ada fail PNG)
 RAW_REPO_BASE = "https://raw.githubusercontent.com/mamaiv3/Universal-LPC-Spritesheet-Character-Generator/master/sheet_definitions"
 
-# Senarai preset fail sedia ada bagi setiap lapisan (Static Fallback List)
+# Senarai laluan fail PNG yang dipastikan wujud di Repo A
 PRESET_ASSETS = {
-    "body": ["male/light.png", "female/light.png", "male/dark.png"],
-    "head": ["heads/human/male/light.png", "heads/human/female/light.png"],
-    "hair": ["male/plain.png", "female/long.png", "male/bedhead.png"],
-    "torso": ["shirts/longsleeve/male/white.png", "shirts/longsleeve/female/white.png"],
-    "legs": ["pants/male/teal.png", "pants/female/teal.png"],
-    "feet": ["shoes/male/black.png", "shoes/female/black.png"]
+    "body": ["body/female/light.png", "body/male/light.png", "body/male/dark.png"],
+    "head": ["head/heads/human/male/light.png", "head/heads/human/female/light.png"],
+    "hair": ["hair/male/plain.png", "hair/female/long.png", "hair/male/bedhead.png"],
+    "torso": ["torso/shirts/longsleeve/male/white.png", "torso/shirts/longsleeve/female/white.png"],
+    "legs": ["legs/pants/male/teal.png", "legs/pants/female/teal.png"],
+    "feet": ["feet/shoes/male/black.png", "feet/shoes/female/black.png"]
 }
 
 @st.cache_data(show_spinner=False)
 def load_image_from_raw_url(rel_path: str):
-    url = f"{RAW_REPO_BASE}/{rel_path}"
-    try:
-        res = requests.get(url, timeout=10)
-        if res.status_code == 200:
-            return res.content
-    except Exception:
-        pass
+    # Cuba beberapa variasi laluan jika laluan utama tidak dijumpai
+    candidate_urls = [
+        f"{RAW_REPO_BASE}/{rel_path}",
+        f"{RAW_REPO_BASE}/{rel_path.split('/', 1)[-1]}" if '/' in rel_path else None
+    ]
+    
+    for url in candidate_urls:
+        if not url:
+            continue
+        try:
+            res = requests.get(url, timeout=10)
+            if res.status_code == 200:
+                return res.content
+        except Exception:
+            pass
     return None
 
 def composite_spritesheet(selected_paths: list) -> Image.Image:
@@ -116,7 +123,6 @@ st.caption("Penjana Watak 2D NPC Terbina")
 
 with st.sidebar:
     st.header("⚙️ Tetapan Pakaian Watak")
-    st.success("Mod Telefon: Memuatkan fail secara terus (Tanpa API Rate Limit)")
 
     if st.button("🎲 Randomize NPC Watak", use_container_width=True, type="primary"):
         st.session_state['random_trigger'] = True
