@@ -19,9 +19,8 @@ st.set_page_config(
 # KONFIGURASI HIRARKI & SPESIFIKASI LPC
 # -----------------------------------------------------------------------------
 LPC_LAYER_ORDER = [
-    'shadow', 'body', 'bodies', 'eyes', 'head', 'facial', 'beards', 'hair',
-    'legs', 'feet', 'torso', 'armour', 'arms', 'hands', 'wrists', 'bracers',
-    'cape', 'backpack', 'quiver', 'shield', 'hat', 'tools', 'wings', 'tail'
+    'body', 'head', 'headwear', 'hair', 'arms', 'torso', 
+    'legs', 'feet', 'tools', 'weapons'
 ]
 
 LPC_ANIM_MAP = {
@@ -43,55 +42,50 @@ DIRECTION_MAP = {
 SHEET_WIDTH = 832
 SHEET_HEIGHT = 1344
 
+RAW_BASE_URL = "https://raw.githubusercontent.com/mamaiv3/Universal-LPC-Spritesheet-Character-Generator/master/sheet_definitions"
+
 # -----------------------------------------------------------------------------
-# MEMBACA FOLDER DARI GITHUB API DIRECTLY
+# AMBIL KATALOG GUNA GIT TREE (HANYA 1 API CALL)
 # -----------------------------------------------------------------------------
-@st.cache_data(show_spinner="Memuat turun fail dari GitHub Folder...")
-def fetch_github_folder_contents(owner: str, repo: str, branch: str, path: str):
+@st.cache_data(ttl=3600, show_spinner="Memuat naik senarai fail dari GitHub...")
+def get_repo_catalog():
     """
-    Mendapatkan senarai fail dan memuat turun imej dari folder GitHub.
+    Menggunakan Git Tree API (1 call sahaja) untuk mengambil keseluruhan senarai fail.
     """
     catalog = {}
-    images_db = {}
+    url = "https://api.github.com/repos/mamaiv3/Universal-LPC-Spritesheet-Character-Generator/git/trees/master?recursive=1"
     
-    api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}"
+    headers = {"User-Agent": "StreamlitApp"}
     
+    # Guna Personal Access Token jika disetkan dalam Streamlit Secrets
+    if "GITHUB_TOKEN" in st.secrets:
+        headers["Authorization"] = f"token {st.secrets['GITHUB_TOKEN']}"
+
     try:
-        response = requests.get(api_url, timeout=15)
-        response.raise_for_status()
-        items = response.json()
-        
-        for item in items:
-            # Jika item ialah item fail PNG
-            if item.get("type") == "file" and item.get("name").endswith(".png"):
-                file_name = item["name"]
-                download_url = item["download_url"]
-                
-                # Mengkategorikan fail (contoh: 'body', 'hair', dsb.)
-                category = file_name.split("_")[0].lower() if "_" in file_name else "uncategorized"
-                if category == 'bodies':
-                    category = 'body'
-                
-                if category not in catalog:
-                    catalog[category] = {}
-                
-                catalog[category][file_name] = download_url
-                
-            # Jika terdapat sub-folder di dalamnya
-            elif item.get("type") == "dir":
-                sub_catalog, sub_db = fetch_github_folder_contents(owner, repo, branch, item["path"])
-                for cat, files in sub_catalog.items():
+        res = requests.get(url, headers=headers, timeout=15)
+        res.raise_for_status()
+        tree_data = res.json().get("tree", [])
+
+        for item in tree_data:
+            path = item.get("path", "")
+            if path.startswith("sheet_definitions/") and path.endswith(".png"):
+                parts = path.split("/")
+                if len(parts) >= 3:
+                    cat = parts[1]
+                    file_name = parts[-1]
+                    raw_url = f"https://raw.githubusercontent.com/mamaiv3/Universal-LPC-Spritesheet-Character-Generator/master/{path}"
+
                     if cat not in catalog:
                         catalog[cat] = {}
-                    catalog[cat].update(files)
-                    
-    except Exception as e:
-        st.error(f"Gagal memuat turun folder dari GitHub API: {e}")
-        
-    return catalog, images_db
+                    catalog[cat][file_name] = raw_url
 
-@st.cache_data(show_spinner="Memuat turun imej...")
-def load_image_from_url(url: str):
+    except Exception as e:
+        st.error(f"Ralat API GitHub: {e}. Menampilkan senarai laluan asas.")
+        
+    return catalog
+
+@st.cache_data(show_spinner=False)
+def load_image_from_raw_url(url: str):
     res = requests.get(url, timeout=15)
     return res.content
 
@@ -104,7 +98,7 @@ def composite_spritesheet(selected_urls: list) -> Image.Image:
     for url in selected_urls:
         if url:
             try:
-                img_bytes = load_image_from_url(url)
+                img_bytes = load_image_from_raw_url(url)
                 layer_img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
                 if layer_img.size != (SHEET_WIDTH, SHEET_HEIGHT):
                     layer_img = layer_img.resize((SHEET_WIDTH, SHEET_HEIGHT), Image.Resampling.NEAREST)
@@ -146,18 +140,12 @@ def generate_gif(sheet: Image.Image, anim_name: str, direction_idx: int) -> byte
 # UTAMA: ANTARAMUKA STREAMLIT
 # -----------------------------------------------------------------------------
 st.title("🎨 SpriteStudio Marker - LPC Character Studio")
-st.caption("Penjana Watak 2D NPC Terbina Menggunakan GitHub Folder API")
+st.caption("Penjana Watak 2D NPC Terbina")
+
+catalog = get_repo_catalog()
 
 with st.sidebar:
     st.header("⚙️ Tetapan Folder GitHub")
-
-    # Maklumat Repositori Anda
-    owner = "mamaiv3"
-    repo = "Universal-LPC-Spritesheet-Character-Generator"
-    branch = "master"
-    folder_path = st.text_input("📁 Laluan Folder GitHub:", value="sheet_definitions")
-
-    catalog, _ = fetch_github_folder_contents(owner, repo, branch, folder_path)
 
     if catalog:
         st.success("Berjaya membaca folder GitHub!")
@@ -196,7 +184,7 @@ with st.sidebar:
         if 'random_trigger' in st.session_state:
             st.session_state['random_trigger'] = False
     else:
-        st.error("Tiada fail `.png` dijumpai di dalam folder tersebut.")
+        st.warning("Menunggu kuota GitHub API diset semula atau sila gunakan Github Personal Token.")
 
 ordered_urls = []
 if catalog:
