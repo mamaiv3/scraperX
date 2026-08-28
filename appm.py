@@ -1,7 +1,6 @@
 import os
 import random
 import io
-import zipfile
 import requests
 from PIL import Image
 import streamlit as st
@@ -43,64 +42,41 @@ DIRECTION_MAP = {
 SHEET_WIDTH = 832
 SHEET_HEIGHT = 1344
 
-# -----------------------------------------------------------------------------
-# MUAT TURUN & EKSTRAK ZIP DARI REPO (TANPA HAD GITHUB API)
-# -----------------------------------------------------------------------------
-@st.cache_data(show_spinner="Memuat turun & memproses folder aset dari repositori...")
-def load_repo_assets():
-    """
-    Memuat turun repositori ZIP mentah terus dari GitHub.
-    Kaedah ini tidak melepasi had API GitHub (No Rate Limit).
-    """
-    zip_url = "https://github.com/mamaiv3/Universal-LPC-Spritesheet-Character-Generator/archive/refs/heads/master.zip"
-    catalog = {}
-    images_db = {}
-    
-    try:
-        res = requests.get(zip_url, timeout=60)
-        res.raise_for_status()
-        
-        with zipfile.ZipFile(io.BytesIO(res.content)) as z:
-            for file_info in z.infolist():
-                filename = file_info.filename
-                
-                # Hanya ambil fail .png di dalam folder sheet_definitions
-                if "sheet_definitions/" in filename and filename.endswith(".png"):
-                    parts = filename.split("/")
-                    
-                    # Cari indeks folder sheet_definitions
-                    if "sheet_definitions" in parts:
-                        idx = parts.index("sheet_definitions")
-                        if len(parts) > idx + 2:
-                            cat = parts[idx + 1]
-                            file_name = parts[-1]
-                            
-                            if cat not in catalog:
-                                catalog[cat] = {}
-                            
-                            catalog[cat][file_name] = filename
-                            images_db[filename] = z.read(filename)
-                            
-        return catalog, images_db
-    except Exception as e:
-        st.error(f"Gagal memuat turun fail aset: {e}")
-        return {}, {}
+# URL Mentah Repositori A (Repo asal anda yang ada fail PNG)
+RAW_REPO_BASE = "https://raw.githubusercontent.com/mamaiv3/Universal-LPC-Spritesheet-Character-Generator/master/sheet_definitions"
 
-# -----------------------------------------------------------------------------
-# FUNGSI GABUNGAN LAPISAN PNG
-# -----------------------------------------------------------------------------
-def composite_spritesheet(selected_keys: list, images_db: dict) -> Image.Image:
+# Senarai preset fail sedia ada bagi setiap lapisan (Static Fallback List)
+PRESET_ASSETS = {
+    "body": ["male/light.png", "female/light.png", "male/dark.png"],
+    "head": ["heads/human/male/light.png", "heads/human/female/light.png"],
+    "hair": ["male/plain.png", "female/long.png", "male/bedhead.png"],
+    "torso": ["shirts/longsleeve/male/white.png", "shirts/longsleeve/female/white.png"],
+    "legs": ["pants/male/teal.png", "pants/female/teal.png"],
+    "feet": ["shoes/male/black.png", "shoes/female/black.png"]
+}
+
+@st.cache_data(show_spinner=False)
+def load_image_from_raw_url(rel_path: str):
+    url = f"{RAW_REPO_BASE}/{rel_path}"
+    try:
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            return res.content
+    except Exception:
+        pass
+    return None
+
+def composite_spritesheet(selected_paths: list) -> Image.Image:
     canvas = Image.new("RGBA", (SHEET_WIDTH, SHEET_HEIGHT), (0, 0, 0, 0))
 
-    for key in selected_keys:
-        if key and key in images_db:
-            try:
-                layer_img = Image.open(io.BytesIO(images_db[key])).convert("RGBA")
+    for rel_path in selected_paths:
+        if rel_path:
+            img_bytes = load_image_from_raw_url(rel_path)
+            if img_bytes:
+                layer_img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
                 if layer_img.size != (SHEET_WIDTH, SHEET_HEIGHT):
                     layer_img = layer_img.resize((SHEET_WIDTH, SHEET_HEIGHT), Image.Resampling.NEAREST)
                 canvas = Image.alpha_composite(canvas, layer_img)
-            except Exception:
-                pass
 
     return canvas
 
@@ -138,61 +114,41 @@ def generate_gif(sheet: Image.Image, anim_name: str, direction_idx: int) -> byte
 st.title("🎨 SpriteStudio Marker - LPC Character Studio")
 st.caption("Penjana Watak 2D NPC Terbina")
 
-catalog, images_db = load_repo_assets()
-
 with st.sidebar:
-    st.header("⚙️ Tetapan Folder GitHub")
+    st.header("⚙️ Tetapan Pakaian Watak")
+    st.success("Mod Telefon: Memuatkan fail secara terus (Tanpa API Rate Limit)")
 
-    if catalog:
-        st.success("Berjaya membaca folder aset dari GitHub!")
-        st.markdown("---")
+    if st.button("🎲 Randomize NPC Watak", use_container_width=True, type="primary"):
+        st.session_state['random_trigger'] = True
 
-        if st.button("🎲 Randomize NPC Watak", use_container_width=True, type="primary"):
-            st.session_state['random_trigger'] = True
+    selected_files = {}
 
-        st.markdown("### 👕 Pemilihan Pakaian & Anggota")
+    for cat in LPC_LAYER_ORDER:
+        options = ["-- Tiada / Kosong --"] + PRESET_ASSETS.get(cat, [])
 
-        sorted_categories = sorted(
-            catalog.keys(),
-            key=lambda c: LPC_LAYER_ORDER.index(c) if c in LPC_LAYER_ORDER else 99
+        if st.session_state.get('random_trigger', False) and len(options) > 1:
+            default_idx = random.randint(1, len(options) - 1)
+            st.session_state[f"select_{cat}"] = options[default_idx]
+
+        selected_val = st.selectbox(
+            f"Lapisan: {cat.capitalize()}",
+            options=options,
+            key=f"select_{cat}"
         )
 
-        selected_files = {}
+        if selected_val != "-- Tiada / Kosong --":
+            selected_files[cat] = selected_val
+        else:
+            selected_files[cat] = None
 
-        for cat in sorted_categories:
-            options = ["-- Tiada / Kosong --"] + list(catalog[cat].keys())
+    if 'random_trigger' in st.session_state:
+        st.session_state['random_trigger'] = False
 
-            if st.session_state.get('random_trigger', False):
-                default_idx = random.randint(1, len(options) - 1) if random.random() < 0.85 else 0
-                st.session_state[f"select_{cat}"] = options[default_idx]
-
-            selected_val = st.selectbox(
-                f"Lapisan: {cat.capitalize()}",
-                options=options,
-                key=f"select_{cat}"
-            )
-
-            if selected_val != "-- Tiada / Kosong --":
-                selected_files[cat] = catalog[cat][selected_val]
-            else:
-                selected_files[cat] = None
-
-        if 'random_trigger' in st.session_state:
-            st.session_state['random_trigger'] = False
-
-ordered_keys = []
-if catalog:
-    for cat in LPC_LAYER_ORDER:
-        if cat in selected_files and selected_files[cat]:
-            ordered_keys.append(selected_files[cat])
-
-    for cat, key in selected_files.items():
-        if cat not in LPC_LAYER_ORDER and key:
-            ordered_keys.append(key)
+ordered_paths = [selected_files[cat] for cat in LPC_LAYER_ORDER if selected_files.get(cat)]
 
 col1, col2 = st.columns([1, 1])
 
-if catalog and ordered_keys:
+if ordered_paths:
     with col1:
         st.subheader("🎬 Tetapan Animasi & Arah")
 
@@ -200,7 +156,7 @@ if catalog and ordered_keys:
         direction_name = st.selectbox("Pilih Arah Pandangan:", list(DIRECTION_MAP.keys()))
         direction_idx = DIRECTION_MAP[direction_name]
 
-        composited_sheet = composite_spritesheet(ordered_keys, images_db)
+        composited_sheet = composite_spritesheet(ordered_paths)
         gif_bytes = generate_gif(composited_sheet, anim_name, direction_idx)
 
         st.markdown("#### 👁️ Pratonton Animasi NPC (Live Preview)")
