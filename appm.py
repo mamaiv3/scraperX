@@ -1,7 +1,8 @@
 import os
 import random
 import io
-from pathlib import Path
+import zipfile
+import requests
 from PIL import Image
 import streamlit as st
 
@@ -44,81 +45,75 @@ SHEET_WIDTH = 832
 SHEET_HEIGHT = 1344
 
 # -----------------------------------------------------------------------------
-# FUNGSI IMBASAN FOLDER ASET TEMPATAN
+# MUAT TURUN & BACA REPO GITHUB SECARA MEMORI
 # -----------------------------------------------------------------------------
-@st.cache_data(show_spinner=False)
-def scan_lpc_directory(base_dir: str):
+@st.cache_data(show_spinner="Memuat turun aset dari repositori GitHub...")
+def fetch_and_index_github_repo(zip_url: str):
     """
-    Mengimbas folder spritesheets tempatan dan mengkelaskan semua fail .png
-    mengikut sub-folder utama (category).
+    Memuat turun ZIP repositori dan mengindeks fail PNG mengikut kategori sub-folder.
     """
     catalog = {}
-    base_path = Path(base_dir)
-
-    if not base_path.exists():
-        return catalog
-
-    for file_path in base_path.rglob("*.png"):
-        # Ambil nama kategori dari nama folder induk
-        category = file_path.parent.name.lower()
-        if category == 'bodies':
-            category = 'body'
-
-        if category not in catalog:
-            catalog[category] = {}
-
-        # Simpan laluan fail penuh dengan kunci nama fail
-        rel_key = str(file_path.relative_to(base_path))
-        catalog[category][rel_key] = str(file_path)
-
-    return catalog
+    images_db = {}
+    
+    try:
+        response = requests.get(zip_url, timeout=30)
+        response.raise_for_status()
+        
+        with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+            for file_info in z.infolist():
+                if file_info.filename.endswith(".png"):
+                    parts = file_info.filename.split("/")
+                    if len(parts) > 2:
+                        category = parts[-2].lower()
+                    else:
+                        category = "uncategorized"
+                    
+                    if category == 'bodies':
+                        category = 'body'
+                        
+                    file_key = "/".join(parts[1:])
+                    
+                    if category not in catalog:
+                        catalog[category] = {}
+                    
+                    catalog[category][file_key] = file_key
+                    images_db[file_key] = z.read(file_info.filename)
+                    
+        return catalog, images_db
+    except Exception as e:
+        st.error(f"Gagal memuat turun repositori: {e}")
+        return {}, {}
 
 # -----------------------------------------------------------------------------
-# FUNGSI GABUNGAN LAPISAN PNG (COMPOSITING ENGINE)
+# FUNGSI GABUNGAN LAPISAN PNG
 # -----------------------------------------------------------------------------
-def composite_spritesheet(selected_paths: list) -> Image.Image:
-    """
-    Melapiskan imej PNG secara bertindih menggunakan mod RGBA Pillow.
-    """
+def composite_spritesheet(selected_keys: list, images_db: dict) -> Image.Image:
     canvas = Image.new("RGBA", (SHEET_WIDTH, SHEET_HEIGHT), (0, 0, 0, 0))
 
-    for path in selected_paths:
-        if path and os.path.exists(path):
+    for key in selected_keys:
+        if key in images_db:
             try:
-                layer_img = Image.open(path).convert("RGBA")
-                # Pastikan saiz imej mematuhi piawaian LPC 832x1344
-                if layer_img.size == (SHEET_WIDTH, SHEET_HEIGHT):
-                    canvas = Image.alpha_composite(canvas, layer_img)
-                else:
-                    # Ubah saiz jika terdapat sedikit perbezaan
+                layer_img = Image.open(io.BytesIO(images_db[key])).convert("RGBA")
+                if layer_img.size != (SHEET_WIDTH, SHEET_HEIGHT):
                     layer_img = layer_img.resize((SHEET_WIDTH, SHEET_HEIGHT), Image.Resampling.NEAREST)
-                    canvas = Image.alpha_composite(canvas, layer_img)
-            except Exception as e:
+                canvas = Image.alpha_composite(canvas, layer_img)
+            except Exception:
                 pass
 
     return canvas
 
 def extract_frame(sheet: Image.Image, row: int, frame_idx: int) -> Image.Image:
-    """
-    Memotong bingkai 64x64 piksel dari spritesheet gabungan.
-    """
     left = frame_idx * 64
     top = row * 64
-    right = left + 64
-    bottom = top + 64
-    return sheet.crop((left, top, right, bottom))
+    return sheet.crop((left, top, left + 64, top + 64))
 
 def generate_gif(sheet: Image.Image, anim_name: str, direction_idx: int) -> bytes:
-    """
-    Menjana animasi GIF dalam memori untuk pratonton pantas.
-    """
     anim_info = LPC_ANIM_MAP[anim_name]
     row = anim_info["rowStart"] if anim_name == "Hurt/Die (6 Frame)" else anim_info["rowStart"] + direction_idx
     frames = []
 
     for f in range(anim_info["frames"]):
         frame_img = extract_frame(sheet, row, f)
-        # Besarkan saiz 4x (256x256) supaya tajam pada paparan UI
         resized_frame = frame_img.resize((256, 256), Image.Resampling.NEAREST)
         frames.append(resized_frame)
 
@@ -139,140 +134,119 @@ def generate_gif(sheet: Image.Image, anim_name: str, direction_idx: int) -> byte
 # UTAMA: ANTARAMUKA STREAMLIT
 # -----------------------------------------------------------------------------
 st.title("🎨 SpriteStudio Marker - LPC Character Studio")
-st.caption("Penjana Watak 2D NPC Terbina Menggunakan Streamlit & Python Pillow Engine")
+st.caption("Penjana Watak 2D NPC Terbina Menggunakan Streamlit & GitHub Repository Direct Stream")
 
-# SIDEBAR: KETETAPAN FOLDER & KONTROL
 with st.sidebar:
-    st.header("⚙️ Tetapan Folder & Lapisan")
+    st.header("⚙️ Tetapan Repositori GitHub")
 
-    default_folder = "./spritesheets"
-    if not os.path.exists(default_folder):
-        default_folder = "."
-
-    folder_path = st.text_input("📁 Laluan Folder Spritesheets:", value=default_folder)
-
-    catalog = scan_lpc_directory(folder_path)
-
-    if not catalog:
-        st.error(f"Folder tidak ditemui atau kosong di: `{folder_path}`")
-        st.info("Pastikan laluan folder menunjuk ke direktori yang mempunyai fail `.png` LPC.")
-    else:
-        st.success(f"Berjaya imbas {len(catalog)} kategori lapisan!")
-
-    st.markdown("---")
-    
-    # BUTANG RANDOMIZE NPC
-    if st.button("🎲 Randomize NPC Watak", use_container_width=True, type="primary"):
-        st.session_state['random_trigger'] = True
-
-    st.markdown("### 👕 Pemilihan Pakaian & Anggota")
-
-    # Susun kategori mengikut hirarki LPC
-    sorted_categories = sorted(
-        catalog.keys(),
-        key=lambda c: LPC_LAYER_ORDER.index(c) if c in LPC_LAYER_ORDER else 99
+    # Tukar URL ini kepada pautan main.zip repositori LPC anda jika berbeza
+    github_zip_url = st.text_input(
+        "🔗 URL Repositori (ZIP Archive):",
+        value="https://github.com/sanderfrenken/Universal-LPC-Spritesheet-Character-Generator/archive/refs/heads/master.zip"
     )
 
-    selected_files = {}
+    catalog, images_db = fetch_and_index_github_repo(github_zip_url)
 
-    for cat in sorted_categories:
-        options = ["-- Tiada / Kosong --"] + list(catalog[cat].keys())
+    if catalog:
+        st.success(f"Berjaya memuat naik {len(images_db)} imej PNG!")
+        st.markdown("---")
 
-        # Logik Rawak jika butang ditekan
-        if st.session_state.get('random_trigger', False):
-            if random.random() < 0.85:
-                default_idx = random.randint(1, len(options) - 1)
-            else:
-                default_idx = 0
-            st.session_state[f"select_{cat}"] = options[default_idx]
+        if st.button("🎲 Randomize NPC Watak", use_container_width=True, type="primary"):
+            st.session_state['random_trigger'] = True
 
-        selected_val = st.selectbox(
-            f"Lapisan: {cat.capitalize()}",
-            options=options,
-            key=f"select_{cat}"
+        st.markdown("### 👕 Pemilihan Pakaian & Anggota")
+
+        sorted_categories = sorted(
+            catalog.keys(),
+            key=lambda c: LPC_LAYER_ORDER.index(c) if c in LPC_LAYER_ORDER else 99
         )
 
-        if selected_val != "-- Tiada / Kosong --":
-            selected_files[cat] = catalog[cat][selected_val]
-        else:
-            selected_files[cat] = None
+        selected_files = {}
 
-    # Reset trigger rawak
-    if 'random_trigger' in st.session_state:
-        st.session_state['random_trigger'] = False
+        for cat in sorted_categories:
+            options = ["-- Tiada / Kosong --"] + list(catalog[cat].keys())
 
-# SUSUNAN SELEKSI IMEJ MENGIKUT Z-INDEX LPC
-ordered_image_paths = []
+            if st.session_state.get('random_trigger', False):
+                default_idx = random.randint(1, len(options) - 1) if random.random() < 0.85 else 0
+                st.session_state[f"select_{cat}"] = options[default_idx]
+
+            selected_val = st.selectbox(
+                f"Lapisan: {cat.capitalize()}",
+                options=options,
+                key=f"select_{cat}"
+            )
+
+            if selected_val != "-- Tiada / Kosong --":
+                selected_files[cat] = catalog[cat][selected_val]
+            else:
+                selected_files[cat] = None
+
+        if 'random_trigger' in st.session_state:
+            st.session_state['random_trigger'] = False
+
+ordered_image_keys = []
 for cat in LPC_LAYER_ORDER:
     if cat in selected_files and selected_files[cat]:
-        ordered_image_paths.append(selected_files[cat])
+        ordered_image_keys.append(selected_files[cat])
 
-# Tambah mana-mana kategori lebihan yang tidak termasuk dalam hirarki standard
 for cat, pth in selected_files.items():
     if cat not in LPC_LAYER_ORDER and pth:
-        ordered_image_paths.append(pth)
+        ordered_image_keys.append(pth)
 
-# MAIN PANEL: PRATONTON & EKSPORT
 col1, col2 = st.columns([1, 1])
 
-with col1:
-    st.subheader("🎬 Tetapan Animasi & Arah")
+if catalog:
+    with col1:
+        st.subheader("🎬 Tetapan Animasi & Arah")
 
-    anim_name = st.selectbox("Pilih Jenis Animasi:", list(LPC_ANIM_MAP.keys()))
-    direction_name = st.selectbox("Pilih Arah Pandangan:", list(DIRECTION_MAP.keys()))
-    direction_idx = DIRECTION_MAP[direction_name]
+        anim_name = st.selectbox("Pilih Jenis Animasi:", list(LPC_ANIM_MAP.keys()))
+        direction_name = st.selectbox("Pilih Arah Pandangan:", list(DIRECTION_MAP.keys()))
+        direction_idx = DIRECTION_MAP[direction_name]
 
-    # BINA COMPOSITED SPRITESHEET IN-MEMORY
-    composited_sheet = composite_spritesheet(ordered_image_paths)
+        composited_sheet = composite_spritesheet(ordered_image_keys, images_db)
+        gif_bytes = generate_gif(composited_sheet, anim_name, direction_idx)
 
-    # MENJANA PRATONTON GIF
-    gif_bytes = generate_gif(composited_sheet, anim_name, direction_idx)
+        st.markdown("#### 👁️ Pratonton Animasi NPC (Live Preview)")
+        st.image(gif_bytes, caption=f"Animasi: {anim_name} | {direction_name}", width=256)
 
-    st.markdown("#### 👁️ Pratonton Animasi NPC (Live Preview)")
-    st.image(gif_bytes, caption=f"Animasi: {anim_name} | {direction_name}", width=256)
+    with col2:
+        st.subheader("🖼️ Spritesheet Tergabung Penuh")
+        st.image(composited_sheet, caption="Full LPC Spritesheet Matrix (832 x 1344 px)", use_column_width=True)
 
-with col2:
-    st.subheader("🖼️ Spritesheet Tergabung Penuh")
-    st.image(composited_sheet, caption="Full LPC Spritesheet Matrix (832 x 1344 px)", use_column_width=True)
+    st.markdown("---")
+    st.subheader("📥 Muat Turun Aset NPC")
 
-st.markdown("---")
-st.subheader("📥 Muat Turun Aset NPC")
+    dl_col1, dl_col2, dl_col3 = st.columns(3)
 
-dl_col1, dl_col2, dl_col3 = st.columns(3)
+    sheet_buf = io.BytesIO()
+    composited_sheet.save(sheet_buf, format="PNG")
 
-# 1. MUAT TURUN FULL PNG SHEET
-sheet_buf = io.BytesIO()
-composited_sheet.save(sheet_buf, format="PNG")
-sheet_bytes = sheet_buf.getvalue()
+    dl_col1.download_button(
+        label="⬇️ Muat Turun Spritesheet PNG",
+        data=sheet_buf.getvalue(),
+        file_name="npc_lpc_character_sheet.png",
+        mime="image/png",
+        use_container_width=True
+    )
 
-dl_col1.download_button(
-    label="⬇️ Muat Turun Spritesheet PNG (832x1344)",
-    data=sheet_bytes,
-    file_name="npc_lpc_character_sheet.png",
-    mime="image/png",
-    use_container_width=True
-)
+    dl_col2.download_button(
+        label="⬇️ Muat Turun Animasi GIF",
+        data=gif_bytes,
+        file_name="npc_animation.gif",
+        mime="image/gif",
+        use_container_width=True
+    )
 
-# 2. MUAT TURUN ANIMATED GIF
-dl_col2.download_button(
-    label="⬇️ Muat Turun Animasi GIF",
-    data=gif_bytes,
-    file_name="npc_animation.gif",
-    mime="image/gif",
-    use_container_width=True
-)
+    anim_info = LPC_ANIM_MAP[anim_name]
+    row_idx = anim_info["rowStart"] if anim_name == "Hurt/Die (6 Frame)" else anim_info["rowStart"] + direction_idx
+    single_frame = extract_frame(composited_sheet, row_idx, 0)
+    frame_buf = io.BytesIO()
+    single_frame.save(frame_buf, format="PNG")
 
-# 3. MUAT TURUN SINGLE FRAME 64x64
-anim_info = LPC_ANIM_MAP[anim_name]
-row_idx = anim_info["rowStart"] if anim_name == "Hurt/Die (6 Frame)" else anim_info["rowStart"] + direction_idx
-single_frame = extract_frame(composited_sheet, row_idx, 0)
-frame_buf = io.BytesIO()
-single_frame.save(frame_buf, format="PNG")
-
-dl_col3.download_button(
-    label="⬇️ Muat Turun Bingkai 64x64 Single PNG",
-    data=frame_buf.getvalue(),
-    file_name="npc_frame_64x64.png",
-    mime="image/png",
-    use_container_width=True
-)
+    dl_col3.download_button(
+        label="⬇️ Muat Turun Frame 64x64",
+        data=frame_buf.getvalue(),
+        file_name="npc_frame_64x64.png",
+        mime="image/png",
+        use_container_width=True
+    )
