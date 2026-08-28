@@ -1,7 +1,6 @@
 import os
 import random
 import io
-import zipfile
 import requests
 from PIL import Image
 import streamlit as st
@@ -17,7 +16,7 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
-# KONFIGURASI HIRARKI & SPESIFIKASI LPC (64x64 GRID)
+# KONFIGURASI HIRARKI & SPESIFIKASI LPC
 # -----------------------------------------------------------------------------
 LPC_LAYER_ORDER = [
     'shadow', 'body', 'bodies', 'eyes', 'head', 'facial', 'beards', 'hair',
@@ -45,55 +44,68 @@ SHEET_WIDTH = 832
 SHEET_HEIGHT = 1344
 
 # -----------------------------------------------------------------------------
-# MUAT TURUN & BACA REPO GITHUB SECARA MEMORI
+# MEMBACA FOLDER DARI GITHUB API DIRECTLY
 # -----------------------------------------------------------------------------
-@st.cache_data(show_spinner="Memuat turun aset dari repositori GitHub...")
-def fetch_and_index_github_repo(zip_url: str):
+@st.cache_data(show_spinner="Memuat turun fail dari GitHub Folder...")
+def fetch_github_folder_contents(owner: str, repo: str, branch: str, path: str):
     """
-    Memuat turun ZIP repositori dan mengindeks fail PNG mengikut kategori sub-folder.
+    Mendapatkan senarai fail dan memuat turun imej dari folder GitHub.
     """
     catalog = {}
     images_db = {}
     
+    api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}"
+    
     try:
-        response = requests.get(zip_url, timeout=30)
+        response = requests.get(api_url, timeout=15)
         response.raise_for_status()
+        items = response.json()
         
-        with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-            for file_info in z.infolist():
-                if file_info.filename.endswith(".png"):
-                    parts = file_info.filename.split("/")
-                    if len(parts) > 2:
-                        category = parts[-2].lower()
-                    else:
-                        category = "uncategorized"
+        for item in items:
+            # Jika item ialah item fail PNG
+            if item.get("type") == "file" and item.get("name").endswith(".png"):
+                file_name = item["name"]
+                download_url = item["download_url"]
+                
+                # Mengkategorikan fail (contoh: 'body', 'hair', dsb.)
+                category = file_name.split("_")[0].lower() if "_" in file_name else "uncategorized"
+                if category == 'bodies':
+                    category = 'body'
+                
+                if category not in catalog:
+                    catalog[category] = {}
+                
+                catalog[category][file_name] = download_url
+                
+            # Jika terdapat sub-folder di dalamnya
+            elif item.get("type") == "dir":
+                sub_catalog, sub_db = fetch_github_folder_contents(owner, repo, branch, item["path"])
+                for cat, files in sub_catalog.items():
+                    if cat not in catalog:
+                        catalog[cat] = {}
+                    catalog[cat].update(files)
                     
-                    if category == 'bodies':
-                        category = 'body'
-                        
-                    file_key = "/".join(parts[1:])
-                    
-                    if category not in catalog:
-                        catalog[category] = {}
-                    
-                    catalog[category][file_key] = file_key
-                    images_db[file_key] = z.read(file_info.filename)
-                    
-        return catalog, images_db
     except Exception as e:
-        st.error(f"Gagal memuat turun repositori: {e}")
-        return {}, {}
+        st.error(f"Gagal memuat turun folder dari GitHub API: {e}")
+        
+    return catalog, images_db
+
+@st.cache_data(show_spinner="Memuat turun imej...")
+def load_image_from_url(url: str):
+    res = requests.get(url, timeout=15)
+    return res.content
 
 # -----------------------------------------------------------------------------
 # FUNGSI GABUNGAN LAPISAN PNG
 # -----------------------------------------------------------------------------
-def composite_spritesheet(selected_keys: list, images_db: dict) -> Image.Image:
+def composite_spritesheet(selected_urls: list) -> Image.Image:
     canvas = Image.new("RGBA", (SHEET_WIDTH, SHEET_HEIGHT), (0, 0, 0, 0))
 
-    for key in selected_keys:
-        if key in images_db:
+    for url in selected_urls:
+        if url:
             try:
-                layer_img = Image.open(io.BytesIO(images_db[key])).convert("RGBA")
+                img_bytes = load_image_from_url(url)
+                layer_img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
                 if layer_img.size != (SHEET_WIDTH, SHEET_HEIGHT):
                     layer_img = layer_img.resize((SHEET_WIDTH, SHEET_HEIGHT), Image.Resampling.NEAREST)
                 canvas = Image.alpha_composite(canvas, layer_img)
@@ -134,21 +146,21 @@ def generate_gif(sheet: Image.Image, anim_name: str, direction_idx: int) -> byte
 # UTAMA: ANTARAMUKA STREAMLIT
 # -----------------------------------------------------------------------------
 st.title("🎨 SpriteStudio Marker - LPC Character Studio")
-st.caption("Penjana Watak 2D NPC Terbina Menggunakan Streamlit & GitHub Repository Direct Stream")
+st.caption("Penjana Watak 2D NPC Terbina Menggunakan GitHub Folder API")
 
 with st.sidebar:
-    st.header("⚙️ Tetapan Repositori GitHub")
+    st.header("⚙️ Tetapan Folder GitHub")
 
-    # Tukar URL ini kepada pautan main.zip repositori LPC anda jika berbeza
-    github_zip_url = st.text_input(
-        "🔗 URL Repositori (ZIP Archive):",
-        value="https://github.com/sanderfrenken/Universal-LPC-Spritesheet-Character-Generator/archive/refs/heads/master.zip"
-    )
+    # Maklumat Repositori Anda
+    owner = "mamaiv3"
+    repo = "Universal-LPC-Spritesheet-Character-Generator"
+    branch = "master"
+    folder_path = st.text_input("📁 Laluan Folder GitHub:", value="sheet_definitions")
 
-    catalog, images_db = fetch_and_index_github_repo(github_zip_url)
+    catalog, _ = fetch_github_folder_contents(owner, repo, branch, folder_path)
 
     if catalog:
-        st.success(f"Berjaya memuat naik {len(images_db)} imej PNG!")
+        st.success("Berjaya membaca folder GitHub!")
         st.markdown("---")
 
         if st.button("🎲 Randomize NPC Watak", use_container_width=True, type="primary"):
@@ -183,19 +195,22 @@ with st.sidebar:
 
         if 'random_trigger' in st.session_state:
             st.session_state['random_trigger'] = False
+    else:
+        st.error("Tiada fail `.png` dijumpai di dalam folder tersebut.")
 
-ordered_image_keys = []
-for cat in LPC_LAYER_ORDER:
-    if cat in selected_files and selected_files[cat]:
-        ordered_image_keys.append(selected_files[cat])
+ordered_urls = []
+if catalog:
+    for cat in LPC_LAYER_ORDER:
+        if cat in selected_files and selected_files[cat]:
+            ordered_urls.append(selected_files[cat])
 
-for cat, pth in selected_files.items():
-    if cat not in LPC_LAYER_ORDER and pth:
-        ordered_image_keys.append(pth)
+    for cat, url in selected_files.items():
+        if cat not in LPC_LAYER_ORDER and url:
+            ordered_urls.append(url)
 
 col1, col2 = st.columns([1, 1])
 
-if catalog:
+if catalog and ordered_urls:
     with col1:
         st.subheader("🎬 Tetapan Animasi & Arah")
 
@@ -203,7 +218,7 @@ if catalog:
         direction_name = st.selectbox("Pilih Arah Pandangan:", list(DIRECTION_MAP.keys()))
         direction_idx = DIRECTION_MAP[direction_name]
 
-        composited_sheet = composite_spritesheet(ordered_image_keys, images_db)
+        composited_sheet = composite_spritesheet(ordered_urls)
         gif_bytes = generate_gif(composited_sheet, anim_name, direction_idx)
 
         st.markdown("#### 👁️ Pratonton Animasi NPC (Live Preview)")
