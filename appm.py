@@ -276,17 +276,3 @@ dl_col3.download_button(
     mime="image/png",
     use_container_width=True
 )
-```
-
-### Cara Menjalankan Aplikasi Ini:
-
-1. **Pasang Pustaka Dikehendaki**:
-   ```bash
-   pip install streamlit pillow
-   ```
-
-2. **Jalankan Aplikasi Streamlit**:
-   Letakkan fail `app.py` ini di dalam folder repositori anda (sebelah folder `spritesheets`), kemudian jalankan terminal:
-   ```bash
-   streamlit run app.py
-   
